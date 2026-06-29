@@ -3,7 +3,9 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use earthnet_node::{fusion::Fusion, server::app, NodeIdentity};
+use earthnet_node::{
+    fusion::Fusion, relay_client::RelayForwarder, server::app, server::AppState, NodeIdentity,
+};
 use tokio::net::TcpListener;
 
 fn env_parse<T: std::str::FromStr>(key: &str, default: T) -> T {
@@ -33,11 +35,14 @@ async fn main() {
     let window_secs: u64 = env_parse("EARTHNET_CONSENSUS_WINDOW_S", 30);
     let fusion = Arc::new(Fusion::new(identity, consensus_n, radius_km, window_secs));
 
+    let relay = RelayForwarder::new(std::env::var("EARTHNET_RELAY_URL").ok());
+    let state = AppState { fusion, relay };
+
     let addr = std::env::var("EARTHNET_NODE_ADDR").unwrap_or_else(|_| "127.0.0.1:8080".into());
     let listener = TcpListener::bind(&addr).await.expect("bind address");
-    tracing::info!(%addr, consensus_n, "earthnet-node listening");
+    tracing::info!(%addr, consensus_n, relay = state.relay.is_enabled(), "earthnet-node listening");
 
-    axum::serve(listener, app(fusion))
+    axum::serve(listener, app(state))
         .await
         .expect("server error");
 }

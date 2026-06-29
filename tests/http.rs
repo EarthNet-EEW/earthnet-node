@@ -3,7 +3,9 @@ use std::sync::Arc;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use earthnet_node::fusion::Fusion;
-use earthnet_node::{server::app, NodeIdentity};
+use earthnet_node::relay_client::RelayForwarder;
+use earthnet_node::server::{app, AppState};
+use earthnet_node::NodeIdentity;
 use earthnet_protocol::{sign, Location, Observation, SourceType, PROTOCOL_VERSION};
 use ed25519_dalek::SigningKey;
 use http_body_util::BodyExt;
@@ -12,12 +14,10 @@ use rand::{rngs::OsRng, RngCore};
 use tower::ServiceExt; // for `oneshot`
 
 fn router() -> axum::Router {
-    app(Arc::new(Fusion::new(
-        NodeIdentity::ephemeral(),
-        3,
-        100.0,
-        30,
-    )))
+    app(AppState {
+        fusion: Arc::new(Fusion::new(NodeIdentity::ephemeral(), 3, 100.0, 30)),
+        relay: RelayForwarder::new(None),
+    })
 }
 
 fn signed_official_bytes() -> Vec<u8> {
