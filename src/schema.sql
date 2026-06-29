@@ -30,3 +30,11 @@ CREATE TABLE IF NOT EXISTS confirmed_events (
     supersedes        bytea
 );
 SELECT create_hypertable('confirmed_events', 'issued_at', if_not_exists => TRUE);
+
+-- Identity reputation mirror (key-value, for queries/dashboard). The node's
+-- authoritative store stays in-memory + the TSV file; this is updated async.
+CREATE TABLE IF NOT EXISTS reputation (
+    pubkey     bytea PRIMARY KEY,
+    weight     real        NOT NULL,
+    updated_at timestamptz NOT NULL
+);

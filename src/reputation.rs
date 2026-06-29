@@ -44,6 +44,15 @@ impl Reputation {
         }
     }
 
+    /// Snapshot of all identities' decayed weights at `now_ns`, for persistence
+    /// to the DB mirror: `(pubkey, weight, now_ns)`.
+    pub fn snapshot(&self, now_ns: i64) -> Vec<(Vec<u8>, f64, i64)> {
+        self.weights
+            .keys()
+            .map(|pk| (pk.clone(), self.weight(pk, now_ns), now_ns))
+            .collect()
+    }
+
     /// Reward an identity (decays to now, then adds REWARD, capped).
     pub fn reward(&mut self, pubkey: &[u8], now_ns: i64) {
         let w = (self.weight(pubkey, now_ns) + REWARD).min(MAX_WEIGHT);

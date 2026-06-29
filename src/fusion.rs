@@ -129,6 +129,16 @@ impl Fusion {
         self
     }
 
+    /// Snapshot of all identities' reputation (for mirroring to the DB).
+    pub fn reputation_snapshot(&self) -> Vec<(Vec<u8>, f64, i64)> {
+        let now = now_ns();
+        self.state
+            .lock()
+            .expect("fusion state poisoned")
+            .reputation
+            .snapshot(now)
+    }
+
     /// Current (decayed) reputation weight of an identity.
     pub fn reputation_of(&self, pubkey: &[u8]) -> f64 {
         self.state

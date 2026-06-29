@@ -57,6 +57,12 @@ async fn ingest(State(state): State<AppState>, body: Bytes) -> StatusCode {
     match state.fusion.ingest(obs) {
         Ok(Some(event)) => {
             state.persistence.record_event(event.clone());
+            // Consensus events update reputation — mirror the snapshot to the DB.
+            if event.evidence == earthnet_protocol::EvidenceKind::Consensus as i32 {
+                state
+                    .persistence
+                    .record_reputation(state.fusion.reputation_snapshot());
+            }
             state.relay.forward(event.encode_to_vec());
             StatusCode::ACCEPTED
         }

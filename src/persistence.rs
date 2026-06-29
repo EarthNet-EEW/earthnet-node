@@ -13,6 +13,7 @@ use tokio::sync::mpsc;
 enum Record {
     Observation(Observation),
     Event(ConfirmedEvent),
+    Reputation(Vec<(Vec<u8>, f64, i64)>),
 }
 
 /// Handle for recording observations/events; cloneable, cheap.
@@ -37,6 +38,7 @@ impl Persistence {
                 let res = match rec {
                     Record::Observation(o) => insert_observation(&pool, &o).await,
                     Record::Event(e) => insert_event(&pool, &e).await,
+                    Record::Reputation(entries) => upsert_reputation(&pool, &entries).await,
                 };
                 if let Err(e) = res {
                     tracing::warn!(error = %e, "persist failed");
@@ -63,6 +65,35 @@ impl Persistence {
             let _ = tx.try_send(Record::Event(evt));
         }
     }
+
+    /// Non-blocking mirror of the reputation snapshot to the DB.
+    pub fn record_reputation(&self, entries: Vec<(Vec<u8>, f64, i64)>) {
+        if entries.is_empty() {
+            return;
+        }
+        if let Some(tx) = &self.tx {
+            let _ = tx.try_send(Record::Reputation(entries));
+        }
+    }
+}
+
+async fn upsert_reputation(
+    pool: &PgPool,
+    entries: &[(Vec<u8>, f64, i64)],
+) -> Result<(), sqlx::Error> {
+    for (pubkey, weight, ts_ns) in entries {
+        sqlx::query(
+            "INSERT INTO reputation (pubkey, weight, updated_at) \
+             VALUES ($1, $2, to_timestamp($3::double precision / 1e9)) \
+             ON CONFLICT (pubkey) DO UPDATE SET weight = EXCLUDED.weight, updated_at = EXCLUDED.updated_at",
+        )
+        .bind(pubkey)
+        .bind(*weight as f32)
+        .bind(*ts_ns)
+        .execute(pool)
+        .await?;
+    }
+    Ok(())
 }
 
 async fn migrate(pool: &PgPool) -> Result<(), sqlx::Error> {
