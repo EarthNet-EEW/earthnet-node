@@ -33,6 +33,46 @@ pub fn decode_geohash(geohash: &str) -> Option<(f64, f64)> {
     Some(((lat.0 + lat.1) / 2.0, (lon.0 + lon.1) / 2.0))
 }
 
+/// Encodes `(lat, lon)` to a geohash of `len` characters.
+pub fn encode_geohash(lat: f64, lon: f64, len: usize) -> String {
+    let mut lat_lo = -90.0;
+    let mut lat_hi = 90.0;
+    let mut lon_lo = -180.0;
+    let mut lon_hi = 180.0;
+    let mut out = String::with_capacity(len);
+    let mut bit = 0u8;
+    let mut ch = 0usize;
+    let mut even = true;
+    while out.len() < len {
+        if even {
+            let mid = (lon_lo + lon_hi) / 2.0;
+            if lon > mid {
+                ch |= 1 << (4 - bit);
+                lon_lo = mid;
+            } else {
+                lon_hi = mid;
+            }
+        } else {
+            let mid = (lat_lo + lat_hi) / 2.0;
+            if lat > mid {
+                ch |= 1 << (4 - bit);
+                lat_lo = mid;
+            } else {
+                lat_hi = mid;
+            }
+        }
+        even = !even;
+        if bit < 4 {
+            bit += 1;
+        } else {
+            out.push(BASE32[ch] as char);
+            bit = 0;
+            ch = 0;
+        }
+    }
+    out
+}
+
 /// Great-circle distance between two `(lat, lon)` points, in kilometers.
 pub fn haversine_km(a: (f64, f64), b: (f64, f64)) -> f64 {
     const R: f64 = 6371.0;
@@ -60,6 +100,14 @@ mod tests {
     #[test]
     fn invalid_char_returns_none() {
         assert!(decode_geohash("abcil").is_none()); // 'i', 'l' not in base32
+    }
+
+    #[test]
+    fn encode_decode_roundtrip() {
+        let gh = encode_geohash(-21.3, -69.9, 7);
+        let (lat, lon) = decode_geohash(&gh).unwrap();
+        assert!((lat - -21.3).abs() < 0.05, "lat={lat}");
+        assert!((lon - -69.9).abs() < 0.05, "lon={lon}");
     }
 
     #[test]

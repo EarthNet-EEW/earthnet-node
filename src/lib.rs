@@ -7,6 +7,7 @@
 
 pub mod fusion;
 pub mod geo;
+pub mod magnitude;
 pub mod relay_client;
 pub mod server;
 

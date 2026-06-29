@@ -12,12 +12,12 @@ use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use earthnet_protocol::{
-    sign, verify, ConfirmedEvent, EvidenceKind, Observation, SourceType, PROTOCOL_VERSION,
+    sign, verify, ConfirmedEvent, EvidenceKind, Location, Observation, SourceType, PROTOCOL_VERSION,
 };
 use prost::Message;
 
-use crate::geo::{decode_geohash, haversine_km};
-use crate::{random_id, NodeIdentity};
+use crate::geo::{decode_geohash, encode_geohash, haversine_km};
+use crate::{magnitude, random_id, NodeIdentity};
 
 /// Why an ingested observation was rejected.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -160,16 +160,18 @@ impl Fusion {
     /// Builds + signs a ConfirmedEvent from the contributing picks.
     fn make_event(&self, picks: &[Observation], evidence: EvidenceKind) -> ConfirmedEvent {
         let lead = &picks[0];
+        let (epicenter, centroid) = self.estimate_epicenter(picks);
+        let (magnitude, magnitude_uncert) = self.estimate_magnitude(picks, centroid);
         let mut evt = ConfirmedEvent {
             protocol_version: PROTOCOL_VERSION,
             event_id: random_id(),
             pubkey: self.identity.pubkey(),
             origin_time_ns: lead.captured_at_ns,
             issued_at_ns: now_ns(),
-            epicenter: lead.location.clone(),
+            epicenter,
             depth_km: 0.0,
-            magnitude: lead.reported_magnitude,
-            magnitude_uncert: 0.0,
+            magnitude,
+            magnitude_uncert,
             evidence: evidence as i32,
             num_observations: picks.len() as u32,
             obs_ids: picks.iter().map(|p| p.observation_id.clone()).collect(),
@@ -178,6 +180,64 @@ impl Fusion {
         };
         sign(self.identity.signing_key(), &mut evt);
         evt
+    }
+
+    /// Epicenter as the centroid of contributing pick locations. Returns the
+    /// protobuf Location plus the raw centroid `(lat, lon)` for reuse.
+    fn estimate_epicenter(&self, picks: &[Observation]) -> (Option<Location>, Option<(f64, f64)>) {
+        let coords: Vec<(f64, f64)> = picks
+            .iter()
+            .filter_map(|p| p.location.as_ref().and_then(|l| decode_geohash(&l.geohash)))
+            .collect();
+        if coords.is_empty() {
+            return (picks[0].location.clone(), None);
+        }
+        let n = coords.len() as f64;
+        let lat = coords.iter().map(|c| c.0).sum::<f64>() / n;
+        let lon = coords.iter().map(|c| c.1).sum::<f64>() / n;
+        let location = Location {
+            geohash: encode_geohash(lat, lon, 6),
+            precision_m: 600, // geohash-6 ~ +-0.6 km
+        };
+        (Some(location), Some((lat, lon)))
+    }
+
+    /// Magnitude estimate: authoritative official value if any pick reports one,
+    /// else a provisional PGA-based estimate (large uncertainty).
+    fn estimate_magnitude(
+        &self,
+        picks: &[Observation],
+        centroid: Option<(f64, f64)>,
+    ) -> (f32, f32) {
+        let official_max = picks
+            .iter()
+            .map(|p| p.reported_magnitude)
+            .fold(0.0f32, f32::max);
+        if official_max > 0.0 {
+            return (official_max, magnitude::OFFICIAL_UNCERT);
+        }
+        // strongest pick drives the provisional estimate
+        let peak = picks.iter().max_by(|a, b| {
+            a.estimated_pga
+                .partial_cmp(&b.estimated_pga)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        match peak {
+            Some(p) if p.estimated_pga > 0.0 => {
+                let dist = match (
+                    centroid,
+                    p.location.as_ref().and_then(|l| decode_geohash(&l.geohash)),
+                ) {
+                    (Some(c), Some(pl)) => haversine_km(c, pl),
+                    _ => 0.0,
+                };
+                (
+                    magnitude::estimate_from_pga(p.estimated_pga, dist),
+                    magnitude::PROVISIONAL_UNCERT,
+                )
+            }
+            _ => (0.0, 0.0),
+        }
     }
 }
 

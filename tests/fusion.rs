@@ -29,12 +29,20 @@ fn signed(source: SourceType, p_wave: bool, geohash: &str, t_ns: i64) -> Observa
         }),
         sta_lta_ratio: 8.0,
         p_wave_detected: p_wave,
-        estimated_pga: 0.01,
-        reported_magnitude: 5.5,
+        estimated_pga: 0.05,
+        reported_magnitude: 0.0, // phones don't report magnitude
         signature: Vec::new(),
     };
     sign(&key, &mut obs);
     obs
+}
+
+fn resign(obs: &mut Observation) {
+    let mut secret = [0u8; 32];
+    OsRng.fill_bytes(&mut secret);
+    let key = SigningKey::from_bytes(&secret);
+    obs.pubkey = key.verifying_key().to_bytes().to_vec();
+    sign(&key, obs);
 }
 
 fn phone(geohash: &str, t_ns: i64) -> Observation {
@@ -109,6 +117,45 @@ fn temporally_distant_phones_do_not_correlate() {
         .ingest(phone("66jd2", T0 + 60_000_000_000))
         .unwrap()
         .is_none());
+}
+
+#[test]
+fn official_magnitude_passes_through() {
+    let mut obs = signed(SourceType::Official, true, "66jd2", T0);
+    obs.reported_magnitude = 6.0;
+    resign(&mut obs);
+    let evt = fusion().ingest(obs).unwrap().unwrap();
+    assert_eq!(evt.magnitude, 6.0);
+    assert!(evt.magnitude_uncert > 0.0 && evt.magnitude_uncert < 0.5);
+}
+
+#[test]
+fn consensus_uses_provisional_magnitude() {
+    let f = fusion();
+    f.ingest(phone("66jd2", T0)).unwrap();
+    f.ingest(phone("66jd2", T0 + 1_000_000_000)).unwrap();
+    let evt = f
+        .ingest(phone("66jd2", T0 + 2_000_000_000))
+        .unwrap()
+        .expect("consensus");
+    assert!(
+        evt.magnitude > 0.0,
+        "provisional magnitude should be estimated"
+    );
+    assert!(
+        (evt.magnitude_uncert - 0.8).abs() < 1e-6,
+        "provisional uncertainty"
+    );
+}
+
+#[test]
+fn event_has_centroid_epicenter() {
+    let evt = fusion()
+        .ingest(signed(SourceType::Official, true, "66jd2", T0))
+        .unwrap()
+        .unwrap();
+    let epi = evt.epicenter.expect("epicenter");
+    assert!(!epi.geohash.is_empty());
 }
 
 #[test]
