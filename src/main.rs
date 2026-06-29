@@ -36,7 +36,10 @@ async fn main() {
     let consensus_n: usize = env_parse("EARTHNET_CONSENSUS_N", 4);
     let radius_km: f64 = env_parse("EARTHNET_CONSENSUS_RADIUS_KM", 200.0);
     let window_secs: u64 = env_parse("EARTHNET_CONSENSUS_WINDOW_S", 30);
-    let fusion = Arc::new(Fusion::new(identity, consensus_n, radius_km, window_secs));
+    let min_weight: f64 = env_parse("EARTHNET_CONSENSUS_MIN_WEIGHT", consensus_n as f64);
+    let fusion = Arc::new(
+        Fusion::new(identity, consensus_n, radius_km, window_secs).with_min_weight(min_weight),
+    );
 
     let relay = RelayForwarder::new(std::env::var("EARTHNET_RELAY_URL").ok());
 

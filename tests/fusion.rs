@@ -327,6 +327,41 @@ fn windowed_association_fires_coherent_amid_noise() {
 }
 
 #[test]
+fn reputation_rewards_inliers() {
+    let f = fusion(); // N=3, default min_weight=3
+    let k1 = key();
+    f.ingest(phone_signed_by(&k1, "66jd2", T0)).unwrap();
+    f.ingest(phone_signed_by(&key(), "66jd2", T0 + 1_000_000_000))
+        .unwrap();
+    let evt = f
+        .ingest(phone_signed_by(&key(), "66jd2", T0 + 2_000_000_000))
+        .unwrap();
+    assert!(
+        evt.is_some(),
+        "fresh trio (weight 3 >= 3) should reach consensus"
+    );
+    let pk = k1.verifying_key().to_bytes().to_vec();
+    assert!(
+        f.reputation_of(&pk) > 1.0,
+        "an inlier's reputation should increase"
+    );
+}
+
+#[test]
+fn insufficient_reputation_is_rejected() {
+    // require summed weight >= 4, but three fresh identities only sum to 3.0
+    let f = Fusion::new(NodeIdentity::ephemeral(), 3, 100.0, 30).with_min_weight(4.0);
+    f.ingest(phone("66jd2", T0)).unwrap();
+    f.ingest(phone("66jd2", T0 + 1_000_000_000)).unwrap();
+    assert!(
+        f.ingest(phone("66jd2", T0 + 2_000_000_000))
+            .unwrap()
+            .is_none(),
+        "coherent but low-reputation cluster must not confirm"
+    );
+}
+
+#[test]
 fn invalid_signature_is_rejected() {
     let mut obs = signed(SourceType::Official, true, "66jd2", T0);
     obs.sta_lta_ratio = 999.0;
