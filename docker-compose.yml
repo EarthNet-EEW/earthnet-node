@@ -1,0 +1,22 @@
+# TimescaleDB for node persistence (async, off the hot path).
+# Full-stack images for node/relay/adapter are a later slice; this provides the
+# database the node depends on.
+#
+#   docker compose up -d
+#   EARTHNET_DATABASE_URL=postgres://postgres:earthnet@127.0.0.1:5433/earthnet cargo run
+#
+# Host port 5433 to avoid clashing with a local Postgres on 5432.
+services:
+  timescaledb:
+    image: timescale/timescaledb:latest-pg16
+    container_name: earthnet-tsdb
+    environment:
+      POSTGRES_PASSWORD: earthnet
+      POSTGRES_DB: earthnet
+    ports:
+      - "5433:5432"
+    volumes:
+      - earthnet_pgdata:/var/lib/postgresql/data
+
+volumes:
+  earthnet_pgdata:

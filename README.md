@@ -31,8 +31,23 @@ Phone consensus is **spatial + temporal**: ≥ N picks within `radius_km` and
 cargo run
 # env: EARTHNET_NODE_ADDR (127.0.0.1:8080), EARTHNET_CONSENSUS_N (3),
 #      EARTHNET_CONSENSUS_RADIUS_KM (100), EARTHNET_CONSENSUS_WINDOW_S (30),
-#      EARTHNET_NODE_KEY_FILE (node_key.hex), EARTHNET_NODE_KEY (hex seed, overrides file)
+#      EARTHNET_NODE_KEY_FILE (node_key.hex), EARTHNET_NODE_KEY (hex seed, overrides file),
+#      EARTHNET_RELAY_URL (forward ConfirmedEvents to a relay),
+#      EARTHNET_DATABASE_URL (persist to PostgreSQL/TimescaleDB; disabled if unset)
 ```
+
+## Persistence
+
+Observations and ConfirmedEvents are written to PostgreSQL/TimescaleDB
+**asynchronously, off the hot path** (a full channel drops records rather than
+stalling ingest). No `EARTHNET_DATABASE_URL` → persistence is a no-op.
+
+```sh
+docker compose up -d   # TimescaleDB on host port 5433
+EARTHNET_DATABASE_URL=postgres://postgres:earthnet@127.0.0.1:5433/earthnet cargo run
+```
+
+Schema (`src/schema.sql`) creates `observations` + `confirmed_events` hypertables.
 
 ## Status
 

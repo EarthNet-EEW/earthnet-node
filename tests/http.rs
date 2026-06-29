@@ -3,6 +3,7 @@ use std::sync::Arc;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use earthnet_node::fusion::Fusion;
+use earthnet_node::persistence::Persistence;
 use earthnet_node::relay_client::RelayForwarder;
 use earthnet_node::server::{app, AppState};
 use earthnet_node::NodeIdentity;
@@ -17,6 +18,7 @@ fn router() -> axum::Router {
     app(AppState {
         fusion: Arc::new(Fusion::new(NodeIdentity::ephemeral(), 3, 100.0, 30)),
         relay: RelayForwarder::new(None),
+        persistence: Persistence::disabled(),
     })
 }
 

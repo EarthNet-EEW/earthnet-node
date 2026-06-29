@@ -4,7 +4,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use earthnet_node::{
-    fusion::Fusion, relay_client::RelayForwarder, server::app, server::AppState, NodeIdentity,
+    fusion::Fusion, persistence::Persistence, relay_client::RelayForwarder, server::app,
+    server::AppState, NodeIdentity,
 };
 use tokio::net::TcpListener;
 
@@ -36,7 +37,26 @@ async fn main() {
     let fusion = Arc::new(Fusion::new(identity, consensus_n, radius_km, window_secs));
 
     let relay = RelayForwarder::new(std::env::var("EARTHNET_RELAY_URL").ok());
-    let state = AppState { fusion, relay };
+
+    let persistence = match std::env::var("EARTHNET_DATABASE_URL") {
+        Ok(url) => match Persistence::connect(&url).await {
+            Ok(p) => {
+                tracing::info!("persistence enabled");
+                p
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "persistence disabled (connect failed)");
+                Persistence::disabled()
+            }
+        },
+        Err(_) => Persistence::disabled(),
+    };
+
+    let state = AppState {
+        fusion,
+        relay,
+        persistence,
+    };
 
     let addr = std::env::var("EARTHNET_NODE_ADDR").unwrap_or_else(|_| "127.0.0.1:8080".into());
     let listener = TcpListener::bind(&addr).await.expect("bind address");

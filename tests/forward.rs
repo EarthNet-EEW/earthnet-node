@@ -9,6 +9,7 @@ use axum::http::{Request, StatusCode};
 use axum::routing::post;
 use axum::Router;
 use earthnet_node::fusion::Fusion;
+use earthnet_node::persistence::Persistence;
 use earthnet_node::relay_client::RelayForwarder;
 use earthnet_node::server::{app, AppState};
 use earthnet_node::NodeIdentity;
@@ -71,6 +72,7 @@ async fn node_forwards_confirmed_event_to_relay() {
     let state = AppState {
         fusion: Arc::new(Fusion::new(NodeIdentity::ephemeral(), 3, 100.0, 30)),
         relay: RelayForwarder::new(Some(format!("http://{addr}"))),
+        persistence: Persistence::disabled(),
     };
 
     let resp = app(state)
