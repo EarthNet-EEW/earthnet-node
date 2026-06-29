@@ -104,6 +104,94 @@ pub fn locate(picks: &[(f64, f64, i64)]) -> Option<Hypocenter> {
     })
 }
 
+/// Windowed phase association (binder-style): over a window of picks (which may
+/// include noise), grid-search the hypocenter that explains the MOST picks as
+/// inliers — picks whose implied origin (`t - travel_time`) clusters around a
+/// common value within `residual_tol_s`. Returns the located hypocenter and the
+/// indices of the inlier picks, iff at least `min_n` inliers are found.
+///
+/// This is the dense-network fix: it extracts the largest coherent subset
+/// instead of greedily firing on the first N, so a real event is recovered even
+/// when mixed with unrelated noise picks.
+pub fn associate_window(
+    picks: &[(f64, f64, i64)],
+    min_n: usize,
+    residual_tol_s: f64,
+    span_deg: f64,
+) -> Option<(Hypocenter, Vec<usize>)> {
+    if picks.len() < min_n {
+        return None;
+    }
+    let t0 = picks.iter().map(|p| p.2).min().unwrap();
+    let obs: Vec<(f64, f64, f64)> = picks
+        .iter()
+        .map(|&(la, lo, t)| (la, lo, (t - t0) as f64 / 1e9))
+        .collect();
+    let clat = obs.iter().map(|o| o.0).sum::<f64>() / obs.len() as f64;
+    let clon = obs.iter().map(|o| o.1).sum::<f64>() / obs.len() as f64;
+    let step = (span_deg / 12.0).max(0.02);
+    let steps = (2.0 * span_deg / step) as i64;
+
+    let mut best: Option<(usize, f64, f64, f64, f64, f64, Vec<usize>)> = None;
+    for i in 0..=steps {
+        let la = clat - span_deg + i as f64 * step;
+        for j in 0..=steps {
+            let lo = clon - span_deg + j as f64 * step;
+            for &depth in &DEPTHS_KM {
+                let implied: Vec<f64> = obs
+                    .iter()
+                    .map(|&(sla, slo, t)| {
+                        t - travel_time(haversine_km((la, lo), (sla, slo)), depth)
+                    })
+                    .collect();
+                let origin = median(&implied);
+                let inliers: Vec<usize> = implied
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, &v)| (v - origin).abs() <= residual_tol_s)
+                    .map(|(k, _)| k)
+                    .collect();
+                if inliers.len() < min_n {
+                    continue;
+                }
+                let ss: f64 = inliers.iter().map(|&k| (implied[k] - origin).powi(2)).sum();
+                let rms = (ss / inliers.len() as f64).sqrt();
+                let better = match &best {
+                    None => true,
+                    Some(b) => inliers.len() > b.0 || (inliers.len() == b.0 && rms < b.1),
+                };
+                if better {
+                    best = Some((inliers.len(), rms, la, lo, depth, origin, inliers));
+                }
+            }
+        }
+    }
+    best.map(|(n, rms, la, lo, depth, origin, inliers)| {
+        (
+            Hypocenter {
+                lat: la,
+                lon: lo,
+                depth_km: depth,
+                origin_ns: t0 + (origin * 1e9) as i64,
+                rms_s: rms,
+                n,
+            },
+            inliers,
+        )
+    })
+}
+
+fn median(xs: &[f64]) -> f64 {
+    let mut v: Vec<f64> = xs.to_vec();
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let m = v.len() / 2;
+    if v.len() % 2 == 0 {
+        (v[m - 1] + v[m]) / 2.0
+    } else {
+        v[m]
+    }
+}
+
 /// Best (depth, rms, origin) over the depth grid for a candidate epicenter.
 fn best_depth(obs: &[(f64, f64, f64)], la: f64, lo: f64) -> (f64, f64, f64) {
     let mut best = (0.0, f64::INFINITY, 0.0);
@@ -199,5 +287,42 @@ mod tests {
     #[test]
     fn too_few_picks_is_none() {
         assert!(locate(&[(-21.0, -69.5, 0), (-21.3, -69.9, 1_000_000_000)]).is_none());
+    }
+
+    #[test]
+    fn windowed_association_extracts_coherent_subset_amid_noise() {
+        let mut picks = synth(-21.0, -69.8, 30.0, 1000.0, &STATIONS); // 5 coherent
+                                                                      // unrelated noise picks (times don't fit the source moveout)
+        picks.push((-20.5, -69.4, (1000.0 + 12.0) as i64 * 1_000_000_000));
+        picks.push((-21.4, -70.1, (1000.0 + 25.0) as i64 * 1_000_000_000));
+        let (h, inliers) = associate_window(&picks, 4, 1.5, 2.0).expect("should associate");
+        assert!(
+            inliers.len() >= 5,
+            "recover the 5 coherent picks, got {}",
+            inliers.len()
+        );
+        assert!(
+            haversine_km((h.lat, h.lon), (-21.0, -69.8)) < 50.0,
+            "epicenter off"
+        );
+    }
+
+    #[test]
+    fn windowed_association_rejects_overdetermined_noise() {
+        // incoherent times; requiring ALL 5 to fit one source (over-determined)
+        // has no solution -> rejected. (At low min_n a chance subset can fit;
+        // rejection power comes from over-determination / density.)
+        let picks: Vec<(f64, f64, i64)> = STATIONS
+            .iter()
+            .enumerate()
+            .map(|(i, &(la, lo))| {
+                (
+                    la,
+                    lo,
+                    (1000.0 + [0.0, 9.0, 2.0, 11.0, 4.0][i]) as i64 * 1_000_000_000,
+                )
+            })
+            .collect();
+        assert!(associate_window(&picks, 5, 1.0, 2.0).is_none());
     }
 }

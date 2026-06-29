@@ -299,6 +299,34 @@ fn association_rejects_incoherent_cluster() {
 }
 
 #[test]
+fn windowed_association_fires_coherent_amid_noise() {
+    let f = Fusion::new(NodeIdentity::ephemeral(), 4, 200.0, 30);
+    let origin_s = 1_700_000_000.0;
+    // two noise picks: plausible locations but times that fit no common origin
+    f.ingest(phone_at(-21.0, -69.4, ((origin_s + 20.0) * 1e9) as i64))
+        .unwrap();
+    f.ingest(phone_at(-20.7, -69.9, ((origin_s + 25.0) * 1e9) as i64))
+        .unwrap();
+    // four coherent picks (moveout) from one source, alongside the buffered noise
+    let src = (-21.05, -69.55);
+    let mut evt = None;
+    for &(la, lo) in &CLUSTER {
+        let t = origin_s + travel_time(haversine_km(src, (la, lo)), SRC_DEPTH_KM);
+        evt = f.ingest(phone_at(la, lo, (t * 1e9) as i64)).unwrap();
+    }
+    let e = evt.expect("coherent subset must fire despite noise picks");
+    assert_eq!(
+        e.num_observations, 4,
+        "should associate exactly the 4 coherent picks (noise excluded)"
+    );
+    let (elat, elon) = decode_geohash(&e.epicenter.as_ref().unwrap().geohash).unwrap();
+    assert!(
+        haversine_km((elat, elon), src) < 40.0,
+        "located epicenter off"
+    );
+}
+
+#[test]
 fn invalid_signature_is_rejected() {
     let mut obs = signed(SourceType::Official, true, "66jd2", T0);
     obs.sta_lta_ratio = 999.0;

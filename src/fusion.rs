@@ -24,16 +24,17 @@ use earthnet_protocol::{
 };
 use prost::Message;
 
+use std::collections::HashSet;
+
 use crate::geo::{decode_geohash, encode_geohash, haversine_km};
-use crate::locate::{locate, Hypocenter};
+use crate::locate::{associate_window, Hypocenter};
 use crate::{magnitude, random_id, NodeIdentity};
 
-/// Max RMS travel-time residual (s) for a phone cluster to be accepted as one
-/// earthquake. Tightened to 1.0 s after the layered-model parameter study
-/// (N=4 / 200 km / 1 s gave 100% detection at the lowest FP). With > N picks
-/// this rejects coincidental noise; near N=3 it mainly yields the located
-/// epicenter/origin.
+/// Max RMS travel-time residual (s) for an associated event to be accepted.
 const MAX_RMS_S: f64 = 1.0;
+/// Inlier threshold (s): a pick joins the associated event if its implied origin
+/// is within this of the cluster's median origin.
+const RESIDUAL_TOL_S: f64 = 1.5;
 
 /// Why an ingested observation was rejected.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -117,10 +118,8 @@ impl Fusion {
                     Some((vec![obs], EvidenceKind::Official, None))
                 }
                 Ok(SourceType::Official) => None,
-                Ok(SourceType::Phone) => match self.cluster_phone(obs)? {
-                    Some(picks) => {
-                        associate(&picks).map(|h| (picks, EvidenceKind::Consensus, Some(h)))
-                    }
+                Ok(SourceType::Phone) => match self.window_associate(obs)? {
+                    Some((picks, h)) => Some((picks, EvidenceKind::Consensus, Some(h))),
                     None => None,
                 },
                 _ => return Err(IngestError::BadFields),
@@ -133,9 +132,15 @@ impl Fusion {
         Ok(Some(self.build_and_record(&mut st, &picks, evidence, hypo)))
     }
 
-    /// Buffers a phone pick (one vote per identity) and returns the correlated
-    /// cluster once it reaches the consensus threshold.
-    fn cluster_phone(&self, obs: Observation) -> Result<Option<Vec<Observation>>, IngestError> {
+    /// Buffers a phone pick (one vote per identity, sliding time window) and runs
+    /// windowed phase association over the whole buffer; fires the largest
+    /// coherent subset (≥ N picks fitting one hypocenter), consuming those picks
+    /// and leaving unrelated noise picks buffered. This is what makes consensus
+    /// work under dense noise (see backtest/dense_sim.py).
+    fn window_associate(
+        &self,
+        obs: Observation,
+    ) -> Result<Option<(Vec<Observation>, Hypocenter)>, IngestError> {
         let (lat, lon) = obs
             .location
             .as_ref()
@@ -145,9 +150,7 @@ impl Fusion {
         let pubkey = obs.pubkey.clone();
 
         let mut st = self.state.lock().expect("fusion state poisoned");
-
-        // Drop picks too far in time, and any earlier pick from the SAME identity
-        // (one pubkey = one vote — basic Sybil resistance), then add this one.
+        // Sliding time window; one pubkey = one vote (basic Sybil resistance).
         st.phone_buffer
             .retain(|p| (p.t_ns - t_ns).abs() <= self.window_ns && p.obs.pubkey != pubkey);
         st.phone_buffer.push(BufferedPick {
@@ -157,25 +160,28 @@ impl Fusion {
             obs,
         });
 
-        // Partition into the cluster correlated with the new pick and the rest.
-        let mut clustered = Vec::new();
-        let mut rest = Vec::new();
-        for p in st.phone_buffer.drain(..) {
-            let near = haversine_km((lat, lon), (p.lat, p.lon)) <= self.radius_km
-                && (p.t_ns - t_ns).abs() <= self.window_ns;
-            if near {
-                clustered.push(p);
-            } else {
-                rest.push(p);
+        let coords: Vec<(f64, f64, i64)> = st
+            .phone_buffer
+            .iter()
+            .map(|p| (p.lat, p.lon, p.t_ns))
+            .collect();
+        let span_deg = (self.radius_km / 111.0).max(0.3);
+        match associate_window(&coords, self.consensus_n, RESIDUAL_TOL_S, span_deg) {
+            Some((h, inliers)) if h.rms_s <= MAX_RMS_S => {
+                let inset: HashSet<usize> = inliers.into_iter().collect();
+                let mut picks = Vec::new();
+                let mut keep = Vec::new();
+                for (i, p) in st.phone_buffer.drain(..).enumerate() {
+                    if inset.contains(&i) {
+                        picks.push(p.obs);
+                    } else {
+                        keep.push(p);
+                    }
+                }
+                st.phone_buffer = keep;
+                Ok(Some((picks, h)))
             }
-        }
-        st.phone_buffer = rest;
-
-        if clustered.len() >= self.consensus_n {
-            Ok(Some(clustered.into_iter().map(|p| p.obs).collect()))
-        } else {
-            st.phone_buffer.extend(clustered);
-            Ok(None)
+            _ => Ok(None),
         }
     }
 
@@ -264,25 +270,6 @@ impl Fusion {
                     && (origin_time_ns - e.origin_time_ns).abs() <= self.window_ns
             })
             .map(|e| e.event_id.clone())
-    }
-}
-
-/// Travel-time phase association: locate a common hypocenter from the cluster's
-/// P picks; accept only if the RMS residual is within tolerance (picks fit one
-/// earthquake). Returns None to reject the cluster as not a single source.
-fn associate(picks: &[Observation]) -> Option<Hypocenter> {
-    let coords: Vec<(f64, f64, i64)> = picks
-        .iter()
-        .filter_map(|p| {
-            p.location
-                .as_ref()
-                .and_then(|l| decode_geohash(&l.geohash))
-                .map(|(la, lo)| (la, lo, p.captured_at_ns))
-        })
-        .collect();
-    match locate(&coords) {
-        Some(h) if h.rms_s <= MAX_RMS_S => Some(h),
-        _ => None,
     }
 }
 
