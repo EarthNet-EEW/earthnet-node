@@ -1,15 +1,17 @@
-//! Fusion + consensus (v0.2).
+//! Fusion + consensus (v0.3).
 //!
 //! - OFFICIAL + P-wave: emit a ConfirmedEvent immediately (high trust).
-//! - PHONE: a pick joins the buffer; it fires consensus only when ≥ N picks fall
-//!   within `radius_km` AND `window` seconds of each other (correlated in space
-//!   and time). Stale picks (outside the window vs the newest) are pruned.
+//! - PHONE: a pick joins the buffer; consensus fires only when ≥ N picks from
+//!   DISTINCT identities fall within `radius_km` AND `window` seconds of each
+//!   other. One pubkey counts once (basic Sybil resistance) — a single identity
+//!   resending cannot manufacture consensus.
 //!
 //! Epicenter = centroid of contributing picks. Magnitude = official value if
-//! reported, else a provisional PGA-based estimate (see `magnitude`).
+//! reported, else a provisional PGA-based estimate (see `magnitude`). A new event
+//! that correlates with a recently emitted one carries `supersedes` (revision).
 //!
-//! NOT YET MODELED (later slices): depth estimation, supersede/revision of
-//! events, Sybil/reputation, calibrated GMPE coefficients.
+//! NOT YET MODELED (later slices): depth estimation, calibrated GMPE
+//! coefficients, reputation-weighted consensus.
 
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -40,9 +42,18 @@ struct BufferedPick {
     obs: Observation,
 }
 
+/// A reference to a recently emitted event, for supersede detection.
+struct EmittedRef {
+    event_id: Vec<u8>,
+    lat: f64,
+    lon: f64,
+    origin_time_ns: i64,
+}
+
 struct State {
     phone_buffer: Vec<BufferedPick>,
-    emitted: Vec<ConfirmedEvent>,
+    recent: Vec<EmittedRef>,
+    emitted_count: usize,
 }
 
 /// The fusion engine. Thread-safe; share via `Arc`.
@@ -55,7 +66,8 @@ pub struct Fusion {
 }
 
 impl Fusion {
-    /// `consensus_n` phone picks within `radius_km` and `window_secs` trigger consensus.
+    /// `consensus_n` distinct phone identities within `radius_km` and
+    /// `window_secs` trigger consensus.
     pub fn new(
         identity: NodeIdentity,
         consensus_n: usize,
@@ -69,7 +81,8 @@ impl Fusion {
             window_ns: (window_secs as i64).saturating_mul(1_000_000_000),
             state: Mutex::new(State {
                 phone_buffer: Vec::new(),
-                emitted: Vec::new(),
+                recent: Vec::new(),
+                emitted_count: 0,
             }),
         }
     }
@@ -87,39 +100,42 @@ impl Fusion {
             return Err(IngestError::BadFields);
         }
 
-        let event = match SourceType::try_from(obs.source_type) {
-            Ok(SourceType::Official) if obs.p_wave_detected => {
-                Some(self.make_event(&[obs], EvidenceKind::Official))
-            }
-            Ok(SourceType::Official) => None,
-            Ok(SourceType::Phone) => self.ingest_phone(obs)?,
-            _ => return Err(IngestError::BadFields),
-        };
+        let to_emit: Option<(Vec<Observation>, EvidenceKind)> =
+            match SourceType::try_from(obs.source_type) {
+                Ok(SourceType::Official) if obs.p_wave_detected => {
+                    Some((vec![obs], EvidenceKind::Official))
+                }
+                Ok(SourceType::Official) => None,
+                Ok(SourceType::Phone) => self
+                    .cluster_phone(obs)?
+                    .map(|picks| (picks, EvidenceKind::Consensus)),
+                _ => return Err(IngestError::BadFields),
+            };
 
-        if let Some(ref evt) = event {
-            self.state
-                .lock()
-                .expect("fusion state poisoned")
-                .emitted
-                .push(evt.clone());
-        }
-        Ok(event)
+        let Some((picks, evidence)) = to_emit else {
+            return Ok(None);
+        };
+        let mut st = self.state.lock().expect("fusion state poisoned");
+        Ok(Some(self.build_and_record(&mut st, &picks, evidence)))
     }
 
-    /// Buffers a phone pick and fires consensus if a correlated cluster forms.
-    fn ingest_phone(&self, obs: Observation) -> Result<Option<ConfirmedEvent>, IngestError> {
+    /// Buffers a phone pick (one vote per identity) and returns the correlated
+    /// cluster once it reaches the consensus threshold.
+    fn cluster_phone(&self, obs: Observation) -> Result<Option<Vec<Observation>>, IngestError> {
         let (lat, lon) = obs
             .location
             .as_ref()
             .and_then(|l| decode_geohash(&l.geohash))
             .ok_or(IngestError::BadFields)?;
         let t_ns = obs.captured_at_ns;
+        let pubkey = obs.pubkey.clone();
 
         let mut st = self.state.lock().expect("fusion state poisoned");
 
-        // Drop picks too far in time from this one, then add it.
+        // Drop picks too far in time, and any earlier pick from the SAME identity
+        // (one pubkey = one vote — basic Sybil resistance), then add this one.
         st.phone_buffer
-            .retain(|p| (p.t_ns - t_ns).abs() <= self.window_ns);
+            .retain(|p| (p.t_ns - t_ns).abs() <= self.window_ns && p.obs.pubkey != pubkey);
         st.phone_buffer.push(BufferedPick {
             lat,
             lon,
@@ -127,7 +143,7 @@ impl Fusion {
             obs,
         });
 
-        // Partition the buffer into the cluster correlated with the new pick and the rest.
+        // Partition into the cluster correlated with the new pick and the rest.
         let mut clustered = Vec::new();
         let mut rest = Vec::new();
         for p in st.phone_buffer.drain(..) {
@@ -142,10 +158,8 @@ impl Fusion {
         st.phone_buffer = rest;
 
         if clustered.len() >= self.consensus_n {
-            let picks: Vec<Observation> = clustered.into_iter().map(|p| p.obs).collect();
-            Ok(Some(self.make_event(&picks, EvidenceKind::Consensus)))
+            Ok(Some(clustered.into_iter().map(|p| p.obs).collect()))
         } else {
-            // not enough yet — keep the cluster buffered
             st.phone_buffer.extend(clustered);
             Ok(None)
         }
@@ -156,20 +170,32 @@ impl Fusion {
         self.state
             .lock()
             .expect("fusion state poisoned")
-            .emitted
-            .len()
+            .emitted_count
     }
 
-    /// Builds + signs a ConfirmedEvent from the contributing picks.
-    fn make_event(&self, picks: &[Observation], evidence: EvidenceKind) -> ConfirmedEvent {
+    /// Builds, signs, and records a ConfirmedEvent (sets `supersedes` if it
+    /// revises a recently emitted, correlated event).
+    fn build_and_record(
+        &self,
+        st: &mut State,
+        picks: &[Observation],
+        evidence: EvidenceKind,
+    ) -> ConfirmedEvent {
         let lead = &picks[0];
-        let (epicenter, centroid) = self.estimate_epicenter(picks);
-        let (magnitude, magnitude_uncert) = self.estimate_magnitude(picks, centroid);
+        let origin_time_ns = lead.captured_at_ns;
+        let (epicenter, centroid) = estimate_epicenter(picks);
+        let (magnitude, magnitude_uncert) = estimate_magnitude(picks, centroid);
+
+        // Supersede a recent correlated event, if any.
+        let supersedes = centroid
+            .and_then(|c| self.find_superseded(st, c, origin_time_ns))
+            .unwrap_or_default();
+
         let mut evt = ConfirmedEvent {
             protocol_version: PROTOCOL_VERSION,
             event_id: random_id(),
             pubkey: self.identity.pubkey(),
-            origin_time_ns: lead.captured_at_ns,
+            origin_time_ns,
             issued_at_ns: now_ns(),
             epicenter,
             depth_km: 0.0,
@@ -178,69 +204,90 @@ impl Fusion {
             evidence: evidence as i32,
             num_observations: picks.len() as u32,
             obs_ids: picks.iter().map(|p| p.observation_id.clone()).collect(),
-            supersedes: Vec::new(),
+            supersedes,
             signature: Vec::new(),
         };
         sign(self.identity.signing_key(), &mut evt);
+
+        if let Some((lat, lon)) = centroid {
+            st.recent.push(EmittedRef {
+                event_id: evt.event_id.clone(),
+                lat,
+                lon,
+                origin_time_ns,
+            });
+            // keep recent bounded: drop entries far older than the window
+            st.recent
+                .retain(|e| (origin_time_ns - e.origin_time_ns).abs() <= self.window_ns * 4);
+        }
+        st.emitted_count += 1;
         evt
     }
 
-    /// Epicenter as the centroid of contributing pick locations. Returns the
-    /// protobuf Location plus the raw centroid `(lat, lon)` for reuse.
-    fn estimate_epicenter(&self, picks: &[Observation]) -> (Option<Location>, Option<(f64, f64)>) {
-        let coords: Vec<(f64, f64)> = picks
+    /// event_id of the most recent emitted event correlated (space + time) with
+    /// the given centroid, or None.
+    fn find_superseded(&self, st: &State, c: (f64, f64), origin_time_ns: i64) -> Option<Vec<u8>> {
+        st.recent
             .iter()
-            .filter_map(|p| p.location.as_ref().and_then(|l| decode_geohash(&l.geohash)))
-            .collect();
-        if coords.is_empty() {
-            return (picks[0].location.clone(), None);
-        }
-        let n = coords.len() as f64;
-        let lat = coords.iter().map(|c| c.0).sum::<f64>() / n;
-        let lon = coords.iter().map(|c| c.1).sum::<f64>() / n;
-        let location = Location {
-            geohash: encode_geohash(lat, lon, 6),
-            precision_m: 600, // geohash-6 ~ +-0.6 km
-        };
-        (Some(location), Some((lat, lon)))
+            .rev()
+            .find(|e| {
+                haversine_km(c, (e.lat, e.lon)) <= self.radius_km
+                    && (origin_time_ns - e.origin_time_ns).abs() <= self.window_ns
+            })
+            .map(|e| e.event_id.clone())
     }
+}
 
-    /// Magnitude estimate: authoritative official value if any pick reports one,
-    /// else a provisional PGA-based estimate (large uncertainty).
-    fn estimate_magnitude(
-        &self,
-        picks: &[Observation],
-        centroid: Option<(f64, f64)>,
-    ) -> (f32, f32) {
-        let official_max = picks
-            .iter()
-            .map(|p| p.reported_magnitude)
-            .fold(0.0f32, f32::max);
-        if official_max > 0.0 {
-            return (official_max, magnitude::OFFICIAL_UNCERT);
+/// Epicenter as the centroid of contributing pick locations. Returns the
+/// protobuf Location plus the raw centroid `(lat, lon)` for reuse.
+fn estimate_epicenter(picks: &[Observation]) -> (Option<Location>, Option<(f64, f64)>) {
+    let coords: Vec<(f64, f64)> = picks
+        .iter()
+        .filter_map(|p| p.location.as_ref().and_then(|l| decode_geohash(&l.geohash)))
+        .collect();
+    if coords.is_empty() {
+        return (picks[0].location.clone(), None);
+    }
+    let n = coords.len() as f64;
+    let lat = coords.iter().map(|c| c.0).sum::<f64>() / n;
+    let lon = coords.iter().map(|c| c.1).sum::<f64>() / n;
+    let location = Location {
+        geohash: encode_geohash(lat, lon, 6),
+        precision_m: 600, // geohash-6 ~ +-0.6 km
+    };
+    (Some(location), Some((lat, lon)))
+}
+
+/// Magnitude estimate: authoritative official value if any pick reports one,
+/// else a provisional PGA-based estimate (large uncertainty).
+fn estimate_magnitude(picks: &[Observation], centroid: Option<(f64, f64)>) -> (f32, f32) {
+    let official_max = picks
+        .iter()
+        .map(|p| p.reported_magnitude)
+        .fold(0.0f32, f32::max);
+    if official_max > 0.0 {
+        return (official_max, magnitude::OFFICIAL_UNCERT);
+    }
+    let peak = picks.iter().max_by(|a, b| {
+        a.estimated_pga
+            .partial_cmp(&b.estimated_pga)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    match peak {
+        Some(p) if p.estimated_pga > 0.0 => {
+            let dist = match (
+                centroid,
+                p.location.as_ref().and_then(|l| decode_geohash(&l.geohash)),
+            ) {
+                (Some(c), Some(pl)) => haversine_km(c, pl),
+                _ => 0.0,
+            };
+            (
+                magnitude::estimate_from_pga(p.estimated_pga, dist),
+                magnitude::PROVISIONAL_UNCERT,
+            )
         }
-        // strongest pick drives the provisional estimate
-        let peak = picks.iter().max_by(|a, b| {
-            a.estimated_pga
-                .partial_cmp(&b.estimated_pga)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        match peak {
-            Some(p) if p.estimated_pga > 0.0 => {
-                let dist = match (
-                    centroid,
-                    p.location.as_ref().and_then(|l| decode_geohash(&l.geohash)),
-                ) {
-                    (Some(c), Some(pl)) => haversine_km(c, pl),
-                    _ => 0.0,
-                };
-                (
-                    magnitude::estimate_from_pga(p.estimated_pga, dist),
-                    magnitude::PROVISIONAL_UNCERT,
-                )
-            }
-            _ => (0.0, 0.0),
-        }
+        _ => (0.0, 0.0),
     }
 }
 

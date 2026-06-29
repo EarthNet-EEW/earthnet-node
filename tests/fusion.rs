@@ -49,6 +49,31 @@ fn phone(geohash: &str, t_ns: i64) -> Observation {
     signed(SourceType::Phone, true, geohash, t_ns)
 }
 
+fn phone_signed_by(key: &SigningKey, geohash: &str, t_ns: i64) -> Observation {
+    let mut id = [0u8; 16];
+    OsRng.fill_bytes(&mut id);
+    let mut obs = Observation {
+        protocol_version: PROTOCOL_VERSION,
+        observation_id: id.to_vec(),
+        pubkey: key.verifying_key().to_bytes().to_vec(),
+        source_type: SourceType::Phone as i32,
+        source_id: String::new(),
+        captured_at_ns: t_ns,
+        clock_uncert_ms: 10,
+        location: Some(Location {
+            geohash: geohash.into(),
+            precision_m: 2400,
+        }),
+        sta_lta_ratio: 8.0,
+        p_wave_detected: true,
+        estimated_pga: 0.05,
+        reported_magnitude: 0.0,
+        signature: Vec::new(),
+    };
+    sign(key, &mut obs);
+    obs
+}
+
 // consensus_n = 3, radius = 100 km, window = 30 s
 fn fusion() -> Fusion {
     Fusion::new(NodeIdentity::ephemeral(), 3, 100.0, 30)
@@ -156,6 +181,60 @@ fn event_has_centroid_epicenter() {
         .unwrap();
     let epi = evt.epicenter.expect("epicenter");
     assert!(!epi.geohash.is_empty());
+}
+
+#[test]
+fn same_identity_cannot_manufacture_consensus() {
+    let f = fusion();
+    let mut s = [0u8; 32];
+    OsRng.fill_bytes(&mut s);
+    let key = SigningKey::from_bytes(&s);
+    // Same pubkey resending three times = one vote, never reaches N=3.
+    assert!(f
+        .ingest(phone_signed_by(&key, "66jd2", T0))
+        .unwrap()
+        .is_none());
+    assert!(f
+        .ingest(phone_signed_by(&key, "66jd2", T0 + 1_000_000_000))
+        .unwrap()
+        .is_none());
+    assert!(f
+        .ingest(phone_signed_by(&key, "66jd2", T0 + 2_000_000_000))
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn revision_supersedes_recent_correlated_event() {
+    let f = fusion();
+    let e1 = f
+        .ingest(signed(SourceType::Official, true, "66jd2", T0))
+        .unwrap()
+        .unwrap();
+    assert!(e1.supersedes.is_empty(), "first event supersedes nothing");
+    let e2 = f
+        .ingest(signed(
+            SourceType::Official,
+            true,
+            "66jd2",
+            T0 + 5_000_000_000,
+        ))
+        .unwrap()
+        .unwrap();
+    assert_eq!(e2.supersedes, e1.event_id, "second revises the first");
+}
+
+#[test]
+fn distant_event_does_not_supersede() {
+    let f = fusion();
+    f.ingest(signed(SourceType::Official, true, "66jd2", T0))
+        .unwrap()
+        .unwrap();
+    let e2 = f
+        .ingest(signed(SourceType::Official, true, "u33db", T0))
+        .unwrap()
+        .unwrap();
+    assert!(e2.supersedes.is_empty(), "far-away event is independent");
 }
 
 #[test]
