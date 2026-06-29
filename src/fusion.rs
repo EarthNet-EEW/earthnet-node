@@ -5,8 +5,11 @@
 //!   within `radius_km` AND `window` seconds of each other (correlated in space
 //!   and time). Stale picks (outside the window vs the newest) are pruned.
 //!
-//! NOT YET MODELED (later slices): magnitude estimation from the cluster,
-//! epicenter estimation, supersede/revision of events, Sybil/reputation.
+//! Epicenter = centroid of contributing picks. Magnitude = official value if
+//! reported, else a provisional PGA-based estimate (see `magnitude`).
+//!
+//! NOT YET MODELED (later slices): depth estimation, supersede/revision of
+//! events, Sybil/reputation, calibrated GMPE coefficients.
 
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
