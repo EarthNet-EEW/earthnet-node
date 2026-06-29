@@ -31,8 +31,10 @@ async fn main() {
     let identity = NodeIdentity::load_or_create(&key_file).expect("load/create node identity");
     tracing::info!(pubkey = %identity.pubkey_hex(), key_file = %key_file.display(), "node identity");
 
-    let consensus_n: usize = env_parse("EARTHNET_CONSENSUS_N", 3);
-    let radius_km: f64 = env_parse("EARTHNET_CONSENSUS_RADIUS_KM", 100.0);
+    // Defaults from the FP-vs-detection parameter study (backtest/param_study.py):
+    // N=4, radius 200 km gave 100% detection at the lowest false-positive rate.
+    let consensus_n: usize = env_parse("EARTHNET_CONSENSUS_N", 4);
+    let radius_km: f64 = env_parse("EARTHNET_CONSENSUS_RADIUS_KM", 200.0);
     let window_secs: u64 = env_parse("EARTHNET_CONSENSUS_WINDOW_S", 30);
     let fusion = Arc::new(Fusion::new(identity, consensus_n, radius_km, window_secs));
 

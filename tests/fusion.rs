@@ -1,5 +1,6 @@
 use earthnet_node::fusion::{Fusion, IngestError};
 use earthnet_node::geo::{decode_geohash, encode_geohash, haversine_km};
+use earthnet_node::locate::travel_time;
 use earthnet_node::NodeIdentity;
 use earthnet_protocol::{
     sign, verify, EvidenceKind, Location, Observation, SourceType, PROTOCOL_VERSION,
@@ -90,7 +91,7 @@ fn phone_at(lat: f64, lon: f64, t_ns: i64) -> Observation {
     phone_signed_by(&key(), &encode_geohash(lat, lon, 7), t_ns)
 }
 
-const VP: f64 = 6.0;
+const SRC_DEPTH_KM: f64 = 30.0;
 // four stations within ~100 km of each other
 const CLUSTER: [(f64, f64); 4] = [
     (-21.0, -69.5),
@@ -264,7 +265,7 @@ fn association_locates_and_fires_consistent_cluster() {
     let origin_s = 1_700_000_000.0;
     let mut evt = None;
     for &(la, lo) in &CLUSTER {
-        let t = origin_s + haversine_km(src, (la, lo)) / VP;
+        let t = origin_s + travel_time(haversine_km(src, (la, lo)), SRC_DEPTH_KM);
         evt = f.ingest(phone_at(la, lo, (t * 1e9) as i64)).unwrap();
     }
     let e = evt.expect("4 coherent picks must associate and fire");
@@ -285,7 +286,7 @@ fn association_rejects_incoherent_cluster() {
     let origin_s = 1_700_000_000.0;
     let mut last = None;
     for (i, &(la, lo)) in CLUSTER.iter().enumerate() {
-        let mut t = origin_s + haversine_km(src, (la, lo)) / VP;
+        let mut t = origin_s + travel_time(haversine_km(src, (la, lo)), SRC_DEPTH_KM);
         if i == 0 {
             t += 6.0; // one badly mistimed pick — no single source fits
         }

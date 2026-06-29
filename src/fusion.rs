@@ -25,13 +25,15 @@ use earthnet_protocol::{
 use prost::Message;
 
 use crate::geo::{decode_geohash, encode_geohash, haversine_km};
-use crate::locate::{locate, Hypocenter, VP_KM_S};
+use crate::locate::{locate, Hypocenter};
 use crate::{magnitude, random_id, NodeIdentity};
 
 /// Max RMS travel-time residual (s) for a phone cluster to be accepted as one
-/// earthquake. With > N picks this rejects coincidental noise; at exactly N=3
-/// the fit is exact so it mainly yields the located epicenter/origin.
-const MAX_RMS_S: f64 = 2.0;
+/// earthquake. Tightened to 1.0 s after the layered-model parameter study
+/// (N=4 / 200 km / 1 s gave 100% detection at the lowest FP). With > N picks
+/// this rejects coincidental noise; near N=3 it mainly yields the located
+/// epicenter/origin.
+const MAX_RMS_S: f64 = 1.0;
 
 /// Why an ingested observation was rejected.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -196,7 +198,7 @@ impl Fusion {
     ) -> ConfirmedEvent {
         // Located hypocenter (consensus) gives real epicenter + origin time;
         // otherwise (official single pick) fall back to centroid + pick time.
-        let (epicenter, centroid, origin_time_ns) = match located {
+        let (epicenter, centroid, origin_time_ns, depth_km) = match located {
             Some(h) => (
                 Some(Location {
                     geohash: encode_geohash(h.lat, h.lon, 6),
@@ -204,10 +206,11 @@ impl Fusion {
                 }),
                 Some((h.lat, h.lon)),
                 h.origin_ns,
+                h.depth_km as f32,
             ),
             None => {
                 let (epi, c) = estimate_epicenter(picks);
-                (epi, c, picks[0].captured_at_ns)
+                (epi, c, picks[0].captured_at_ns, 0.0)
             }
         };
         let (magnitude, magnitude_uncert) = estimate_magnitude(picks, centroid);
@@ -224,7 +227,7 @@ impl Fusion {
             origin_time_ns,
             issued_at_ns: now_ns(),
             epicenter,
-            depth_km: 0.0,
+            depth_km,
             magnitude,
             magnitude_uncert,
             evidence: evidence as i32,
@@ -277,7 +280,7 @@ fn associate(picks: &[Observation]) -> Option<Hypocenter> {
                 .map(|(la, lo)| (la, lo, p.captured_at_ns))
         })
         .collect();
-    match locate(&coords, VP_KM_S) {
+    match locate(&coords) {
         Some(h) if h.rms_s <= MAX_RMS_S => Some(h),
         _ => None,
     }
