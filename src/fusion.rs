@@ -24,7 +24,8 @@ use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use earthnet_protocol::{
-    sign, verify, ConfirmedEvent, EvidenceKind, Location, Observation, SourceType, PROTOCOL_VERSION,
+    sign, verify, ConfidenceTier, ConfirmedEvent, EvidenceKind, Location, Observation, SourceType,
+    PROTOCOL_VERSION,
 };
 use prost::Message;
 
@@ -294,6 +295,15 @@ impl Fusion {
             .and_then(|c| self.find_superseded(st, c, origin_time_ns))
             .unwrap_or_default();
 
+        // Trust tier (v0.2): an OFFICIAL feed is agency-authoritative -> ALERT.
+        // Single-node CONSENSUS is emitted PROVISIONAL; it upgrades to ALERT only
+        // once it carries >= M node attestations (multi-node attestation slice).
+        let tier = match evidence {
+            EvidenceKind::Official | EvidenceKind::Both => ConfidenceTier::Alert,
+            EvidenceKind::Consensus => ConfidenceTier::Provisional,
+            EvidenceKind::Unspecified => ConfidenceTier::Unspecified,
+        };
+
         let mut evt = ConfirmedEvent {
             protocol_version: PROTOCOL_VERSION,
             event_id: random_id(),
@@ -308,7 +318,9 @@ impl Fusion {
             num_observations: picks.len() as u32,
             obs_ids: picks.iter().map(|p| p.observation_id.clone()).collect(),
             supersedes,
+            tier: tier as i32,
             signature: Vec::new(),
+            attestations: Vec::new(),
         };
         sign(self.identity.signing_key(), &mut evt);
 

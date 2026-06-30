@@ -27,9 +27,11 @@ CREATE TABLE IF NOT EXISTS confirmed_events (
     magnitude_uncert  real,
     evidence          int,
     num_observations  bigint,
-    supersedes        bytea
+    supersedes        bytea,
+    tier              int          -- v0.2 ConfidenceTier (2=PROVISIONAL, 3=ALERT)
 );
 SELECT create_hypertable('confirmed_events', 'issued_at', if_not_exists => TRUE);
+ALTER TABLE confirmed_events ADD COLUMN IF NOT EXISTS tier int; -- migrate existing tables
 
 -- Identity reputation mirror (key-value, for queries/dashboard). The node's
 -- authoritative store stays in-memory + the TSV file; this is updated async.

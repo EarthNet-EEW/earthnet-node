@@ -3,7 +3,7 @@ use earthnet_node::geo::{decode_geohash, encode_geohash, haversine_km};
 use earthnet_node::locate::travel_time;
 use earthnet_node::NodeIdentity;
 use earthnet_protocol::{
-    sign, verify, EvidenceKind, Location, Observation, SourceType, PROTOCOL_VERSION,
+    sign, verify, ConfidenceTier, EvidenceKind, Location, Observation, SourceType, PROTOCOL_VERSION,
 };
 use ed25519_dalek::SigningKey;
 use prost::Message;
@@ -107,6 +107,7 @@ fn official_with_pwave_emits_signed_event() {
         .unwrap()
         .expect("official + p-wave must emit");
     assert_eq!(evt.evidence, EvidenceKind::Official as i32);
+    assert_eq!(evt.tier, ConfidenceTier::Alert as i32); // official is agency-authoritative
     assert_eq!(evt.num_observations, 1);
     assert!(verify(&evt).is_ok());
 }
@@ -132,6 +133,7 @@ fn correlated_phones_reach_consensus() {
         .unwrap()
         .expect("third correlated phone must reach consensus");
     assert_eq!(evt.evidence, EvidenceKind::Consensus as i32);
+    assert_eq!(evt.tier, ConfidenceTier::Provisional as i32); // single-node consensus, not yet certified
     assert_eq!(evt.num_observations, 3);
     assert!(verify(&evt).is_ok());
     // cluster consumed

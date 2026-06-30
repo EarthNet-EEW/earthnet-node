@@ -142,9 +142,9 @@ async fn insert_event(pool: &PgPool, e: &ConfirmedEvent) -> Result<(), sqlx::Err
     sqlx::query(
         "INSERT INTO confirmed_events \
          (issued_at, event_id, origin_time, node_pubkey, epicenter_geohash, \
-          magnitude, magnitude_uncert, evidence, num_observations, supersedes) \
+          magnitude, magnitude_uncert, evidence, num_observations, supersedes, tier) \
          VALUES (to_timestamp($1::double precision / 1e9), $2, \
-                 to_timestamp($3::double precision / 1e9), $4, $5, $6, $7, $8, $9, $10)",
+                 to_timestamp($3::double precision / 1e9), $4, $5, $6, $7, $8, $9, $10, $11)",
     )
     .bind(e.issued_at_ns)
     .bind(&e.event_id)
@@ -156,6 +156,7 @@ async fn insert_event(pool: &PgPool, e: &ConfirmedEvent) -> Result<(), sqlx::Err
     .bind(e.evidence)
     .bind(e.num_observations as i64)
     .bind(supersedes)
+    .bind(e.tier)
     .execute(pool)
     .await?;
     Ok(())
