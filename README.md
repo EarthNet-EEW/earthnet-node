@@ -7,10 +7,10 @@ early-warning network. Ingests signed `Observation`s from country adapters and
 sensors, fuses them + reaches consensus, and emits signed `ConfirmedEvent`s that
 trigger client alarms.
 
-## Trust model (DESIGN Â§5)
+## Trust model (DESIGN §5)
 
-- **OFFICIAL** source (e.g. a CSN/Chile adapter) with a P-wave pick â†’ fires on its own.
-- **PHONE** source â†’ requires consensus of â‰¥ N correlated picks.
+- **OFFICIAL** source (e.g. a CSN/Chile adapter) with a P-wave pick → fires on its own.
+- **PHONE** source → requires consensus of ≥ N correlated picks.
 
 ## Ingest API
 
@@ -21,10 +21,10 @@ POST /observations    body = Observation protobuf
   202 Accepted     verified + ingested
   400 Bad Request  undecodable / bad fields
   401 Unauthorized signature failed
-GET  /health â†’ "ok"
+GET  /health → "ok"
 ```
 
-Phone consensus is **spatial + temporal**: â‰¥ N picks within `radius_km` and
+Phone consensus is **spatial + temporal**: ≥ N picks within `radius_km` and
 `window_s` of each other (correlated by decoded geohash + capture time).
 
 ## Run
@@ -42,7 +42,7 @@ cargo run
 
 Observations and ConfirmedEvents are written to PostgreSQL/TimescaleDB
 **asynchronously, off the hot path** (a full channel drops records rather than
-stalling ingest). No `EARTHNET_DATABASE_URL` â†’ persistence is a no-op.
+stalling ingest). No `EARTHNET_DATABASE_URL` → persistence is a no-op.
 
 ```sh
 docker compose up -d   # TimescaleDB on host port 5433
@@ -53,7 +53,7 @@ Schema (`src/schema.sql`) creates `observations` + `confirmed_events` hypertable
 
 ## Status
 
-ðŸŸ¡ v0.2 â€” HTTP ingest + signature verification + spatial/temporal consensus +
+🟡 v0.2 — HTTP ingest + signature verification + spatial/temporal consensus +
 persisted identity. NOT yet modeled: magnitude/epicenter estimation, event
 revision, relay fan-out wiring, Sybil/reputation.
 
