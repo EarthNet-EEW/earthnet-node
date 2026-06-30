@@ -55,14 +55,18 @@ impl Persistence {
     /// Non-blocking record of a verified observation (dropped if backlogged).
     pub fn record_observation(&self, obs: Observation) {
         if let Some(tx) = &self.tx {
-            let _ = tx.try_send(Record::Observation(obs));
+            if tx.try_send(Record::Observation(obs)).is_err() {
+                crate::metrics::metrics().persistence_dropped.inc();
+            }
         }
     }
 
     /// Non-blocking record of an emitted confirmed event.
     pub fn record_event(&self, evt: ConfirmedEvent) {
         if let Some(tx) = &self.tx {
-            let _ = tx.try_send(Record::Event(evt));
+            if tx.try_send(Record::Event(evt)).is_err() {
+                crate::metrics::metrics().persistence_dropped.inc();
+            }
         }
     }
 
@@ -72,7 +76,9 @@ impl Persistence {
             return;
         }
         if let Some(tx) = &self.tx {
-            let _ = tx.try_send(Record::Reputation(entries));
+            if tx.try_send(Record::Reputation(entries)).is_err() {
+                crate::metrics::metrics().persistence_dropped.inc();
+            }
         }
     }
 }

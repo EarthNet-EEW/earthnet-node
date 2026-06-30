@@ -9,6 +9,7 @@ pub mod fusion;
 pub mod geo;
 pub mod locate;
 pub mod magnitude;
+pub mod metrics;
 pub mod persistence;
 pub mod relay_client;
 pub mod reputation;

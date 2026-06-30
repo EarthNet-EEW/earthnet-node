@@ -60,6 +60,29 @@ async fn health_ok() {
 }
 
 #[tokio::test]
+async fn metrics_endpoint_exposes_prometheus() {
+    let app = router();
+    // ingest one observation so a counter is non-zero
+    app.clone()
+        .oneshot(
+            Request::post("/observations")
+                .body(Body::from(signed_official_bytes()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let resp = app
+        .oneshot(Request::get("/metrics").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let text = String::from_utf8_lossy(&body);
+    assert!(text.contains("earthnet_observations_ingested_total"));
+    assert!(text.contains("earthnet_ingest_seconds"));
+}
+
+#[tokio::test]
 async fn post_valid_observation_accepted() {
     let resp = router()
         .oneshot(
